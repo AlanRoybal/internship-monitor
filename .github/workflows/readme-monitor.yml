@@ -50,7 +50,7 @@ jobs:
               const readmeContent = Buffer.from(response.data.content, 'base64').toString();
               const currentHash = crypto.createHash('md5').update(readmeContent).digest('hex');
               
-              // Store hash in a file
+              // Store hash in a file (will be recreated each run)
               const hashFile = 'readme-hash.txt';
               let previousHash = '';
               
@@ -58,11 +58,26 @@ jobs:
                 previousHash = fs.readFileSync(hashFile, 'utf8').trim();
               }
               
+              // For first run, get the last commit date to determine if this is truly the first run
+              const commitsUrl = `https://api.github.com/repos/${targetRepo}/commits?path=README.md&per_page=1`;
+              const commitsResponse = await axios.get(commitsUrl, {
+                headers: {
+                  'Authorization': `token ${process.env.GITHUB_TOKEN}`,
+                  'Accept': 'application/vnd.github.v3+json'
+                }
+              });
+              
+              const lastCommitDate = new Date(commitsResponse.data[0].commit.committer.date);
+              const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+              
               if (previousHash && previousHash !== currentHash) {
                 console.log('README changed! Sending Discord notification...');
                 await sendDiscordNotification(targetRepo, response.data.html_url);
+              } else if (!previousHash && lastCommitDate > fiveMinutesAgo) {
+                console.log('Recent README change detected on first run! Sending notification...');
+                await sendDiscordNotification(targetRepo, response.data.html_url);
               } else if (!previousHash) {
-                console.log('First run - storing initial hash');
+                console.log('First run - storing initial hash, no recent changes');
               } else {
                 console.log('No changes detected');
               }
@@ -112,11 +127,3 @@ jobs:
           EOF
           
           node monitor.js
-          
-      - name: Commit hash file
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add readme-hash.txt
-          git diff --staged --quiet || git commit -m "Update README hash"
-          git push
