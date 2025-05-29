@@ -114,7 +114,7 @@ jobs:
             };
             
             const payload = {
-              content: "<@Convention>", // This mentions the user @Convention
+              content: "<@497943440676618264>",
               username: "README Monitor",
               embeds: [embed]
             };
