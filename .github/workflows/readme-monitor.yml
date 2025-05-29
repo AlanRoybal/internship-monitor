@@ -1,0 +1,122 @@
+# .github/workflows/readme-monitor.yml
+name: Monitor README Changes
+
+on:
+  schedule:
+    # Runs every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install axios
+          
+      - name: Monitor README
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          TARGET_REPO: ${{ secrets.TARGET_REPO }} # e.g., "microsoft/vscode" (any public repo)
+        run: |
+          cat > monitor.js << 'EOF'
+          const axios = require('axios');
+          const crypto = require('crypto');
+          const fs = require('fs');
+          
+          async function monitorREADME() {
+            try {
+              const targetRepo = process.env.TARGET_REPO;
+              const url = `https://api.github.com/repos/${targetRepo}/readme`;
+              
+              const response = await axios.get(url, {
+                headers: {
+                  'Authorization': `token ${process.env.GITHUB_TOKEN}`,
+                  'Accept': 'application/vnd.github.v3+json'
+                }
+              });
+              
+              const readmeContent = Buffer.from(response.data.content, 'base64').toString();
+              const currentHash = crypto.createHash('md5').update(readmeContent).digest('hex');
+              
+              // Store hash in a file
+              const hashFile = 'readme-hash.txt';
+              let previousHash = '';
+              
+              if (fs.existsSync(hashFile)) {
+                previousHash = fs.readFileSync(hashFile, 'utf8').trim();
+              }
+              
+              if (previousHash && previousHash !== currentHash) {
+                console.log('README changed! Sending Discord notification...');
+                await sendDiscordNotification(targetRepo, response.data.html_url);
+              } else if (!previousHash) {
+                console.log('First run - storing initial hash');
+              } else {
+                console.log('No changes detected');
+              }
+              
+              fs.writeFileSync(hashFile, currentHash);
+              
+            } catch (error) {
+              console.error('Error monitoring README:', error.message);
+            }
+          }
+          
+          async function sendDiscordNotification(repo, readmeUrl) {
+            const webhookUrl = process.env.DISCORD_WEBHOOK;
+            
+            const embed = {
+              title: "📄 README Change Detected!",
+              description: `The README file in **${repo}** has been modified.`,
+              color: 0x00ff00, // Green color
+              fields: [
+                {
+                  name: "Repository",
+                  value: `[${repo}](https://github.com/${repo})`,
+                  inline: true
+                },
+                {
+                  name: "README Link",
+                  value: `[View README](${readmeUrl})`,
+                  inline: true
+                }
+              ],
+              timestamp: new Date().toISOString(),
+              footer: {
+                text: "GitHub README Monitor"
+              }
+            };
+            
+            const payload = {
+              username: "README Monitor",
+              embeds: [embed]
+            };
+            
+            await axios.post(webhookUrl, payload);
+            console.log('Discord notification sent successfully');
+          }
+          
+          monitorREADME();
+          EOF
+          
+          node monitor.js
+          
+      - name: Commit hash file
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add readme-hash.txt
+          git diff --staged --quiet || git commit -m "Update README hash"
+          git push
