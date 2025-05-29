@@ -1,11 +1,10 @@
-# .github/workflows/readme-monitor.yml
 name: Monitor README Changes
 
 on:
   schedule:
     # Runs every 5 minutes
     - cron: '*/5 * * * *'
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -115,6 +114,7 @@ jobs:
             };
             
             const payload = {
+              content: "<@Convention>", // This mentions the user @Convention
               username: "README Monitor",
               embeds: [embed]
             };
