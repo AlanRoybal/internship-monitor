@@ -12,6 +12,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # This ensures we get the hash file from previous runs
+          fetch-depth: 1
         
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -27,7 +30,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          TARGET_REPO: ${{ secrets.TARGET_REPO }} # e.g., "microsoft/vscode" (any public repo)
+          TARGET_REPO: ${{ secrets.TARGET_REPO }}
         run: |
           cat > monitor.js << 'EOF'
           const axios = require('axios');
@@ -37,27 +40,9 @@ jobs:
           async function monitorREADME() {
             try {
               const targetRepo = process.env.TARGET_REPO;
-              const url = `https://api.github.com/repos/${targetRepo}/readme`;
               
-              const response = await axios.get(url, {
-                headers: {
-                  'Authorization': `token ${process.env.GITHUB_TOKEN}`,
-                  'Accept': 'application/vnd.github.v3+json'
-                }
-              });
-              
-              const readmeContent = Buffer.from(response.data.content, 'base64').toString();
-              const currentHash = crypto.createHash('md5').update(readmeContent).digest('hex');
-              
-              // Store hash in a file (will be recreated each run)
-              const hashFile = 'readme-hash.txt';
-              let previousHash = '';
-              
-              if (fs.existsSync(hashFile)) {
-                previousHash = fs.readFileSync(hashFile, 'utf8').trim();
-              }
-              
-              // For first run, get the last commit date to determine if this is truly the first run
+              // Get the latest commit for README.md specifically
+              console.log(`Checking README for ${targetRepo}...`);
               const commitsUrl = `https://api.github.com/repos/${targetRepo}/commits?path=README.md&per_page=1`;
               const commitsResponse = await axios.get(commitsUrl, {
                 headers: {
@@ -66,64 +51,123 @@ jobs:
                 }
               });
               
-              const lastCommitDate = new Date(commitsResponse.data[0].commit.committer.date);
-              const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-              
-              if (previousHash && previousHash !== currentHash) {
-                console.log('README changed! Sending Discord notification...');
-                await sendDiscordNotification(targetRepo, response.data.html_url);
-              } else if (!previousHash && lastCommitDate > fiveMinutesAgo) {
-                console.log('Recent README change detected on first run! Sending notification...');
-                await sendDiscordNotification(targetRepo, response.data.html_url);
-              } else if (!previousHash) {
-                console.log('First run - storing initial hash, no recent changes');
-              } else {
-                console.log('No changes detected');
+              if (commitsResponse.data.length === 0) {
+                console.log('No README.md found or no commits');
+                return;
               }
               
-              fs.writeFileSync(hashFile, currentHash);
+              const latestCommit = commitsResponse.data[0];
+              const latestCommitSha = latestCommit.sha;
+              const commitDate = new Date(latestCommit.commit.committer.date);
+              
+              console.log(`Latest README commit: ${latestCommitSha.substring(0, 7)} at ${commitDate.toISOString()}`);
+              
+              // Check our stored commit SHA
+              const hashFile = 'readme-last-commit.txt';
+              let previousCommitSha = '';
+              
+              if (fs.existsSync(hashFile)) {
+                previousCommitSha = fs.readFileSync(hashFile, 'utf8').trim();
+                console.log(`Previous commit SHA: ${previousCommitSha.substring(0, 7)}`);
+              } else {
+                console.log('No previous commit SHA found - first run');
+              }
+              
+              // If we have a previous commit SHA and it's different, README changed
+              if (previousCommitSha && previousCommitSha !== latestCommitSha) {
+                console.log('README changed! Sending Discord notification...');
+                
+                // Get README URL
+                const readmeUrl = `https://github.com/${targetRepo}/blob/${latestCommitSha}/README.md`;
+                await sendDiscordNotification(targetRepo, readmeUrl, latestCommit);
+              } else if (!previousCommitSha) {
+                // First run - check if commit is recent (within last 10 minutes to be safe)
+                const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+                if (commitDate > tenMinutesAgo) {
+                  console.log('Recent README change detected on first run! Sending notification...');
+                  const readmeUrl = `https://github.com/${targetRepo}/blob/${latestCommitSha}/README.md`;
+                  await sendDiscordNotification(targetRepo, readmeUrl, latestCommit);
+                } else {
+                  console.log('First run - no recent changes detected');
+                }
+              } else {
+                console.log('No changes detected since last check');
+              }
+              
+              // Store current commit SHA
+              fs.writeFileSync(hashFile, latestCommitSha);
               
             } catch (error) {
               console.error('Error monitoring README:', error.message);
+              if (error.response) {
+                console.error('Response status:', error.response.status);
+                console.error('Response data:', error.response.data);
+              }
             }
           }
           
-          async function sendDiscordNotification(repo, readmeUrl) {
-            const webhookUrl = process.env.DISCORD_WEBHOOK;
-            
-            const embed = {
-              title: "📄 README Change Detected!",
-              description: `The README file in **${repo}** has been modified.`,
-              color: 0x00ff00, // Green color
-              fields: [
-                {
-                  name: "Repository",
-                  value: `[${repo}](https://github.com/${repo})`,
-                  inline: true
-                },
-                {
-                  name: "README Link",
-                  value: `[View README](${readmeUrl})`,
-                  inline: true
+          async function sendDiscordNotification(repo, readmeUrl, commit) {
+            try {
+              const webhookUrl = process.env.DISCORD_WEBHOOK;
+              
+              const embed = {
+                title: "📄 README Change Detected!",
+                description: `The README file in **${repo}** has been modified.`,
+                color: 0x00ff00,
+                fields: [
+                  {
+                    name: "Repository",
+                    value: `[${repo}](https://github.com/${repo})`,
+                    inline: true
+                  },
+                  {
+                    name: "README Link",
+                    value: `[View README](${readmeUrl})`,
+                    inline: true
+                  },
+                  {
+                    name: "Latest Commit",
+                    value: `[${commit.sha.substring(0, 7)}](${commit.html_url}) by ${commit.commit.author.name}`,
+                    inline: false
+                  },
+                  {
+                    name: "Commit Message",
+                    value: commit.commit.message.length > 100 
+                      ? commit.commit.message.substring(0, 100) + "..." 
+                      : commit.commit.message,
+                    inline: false
+                  }
+                ],
+                timestamp: new Date().toISOString(),
+                footer: {
+                  text: "GitHub README Monitor"
                 }
-              ],
-              timestamp: new Date().toISOString(),
-              footer: {
-                text: "GitHub README Monitor"
-              }
-            };
-            
-            const payload = {
-              content: "<@497943440676618264>",
-              username: "README Monitor",
-              embeds: [embed]
-            };
-            
-            await axios.post(webhookUrl, payload);
-            console.log('Discord notification sent successfully');
+              };
+              
+              const payload = {
+                content: "<@497943440676618264>",
+                username: "README Monitor",
+                embeds: [embed]
+              };
+              
+              await axios.post(webhookUrl, payload);
+              console.log('Discord notification sent successfully');
+            } catch (error) {
+              console.error('Failed to send Discord notification:', error.message);
+            }
           }
           
           monitorREADME();
           EOF
           
           node monitor.js
+
+      - name: Commit hash file changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          if [ -f readme-last-commit.txt ]; then
+            git add readme-last-commit.txt
+            git diff --staged --quiet || git commit -m "Update README monitor hash"
+            git push
+          fi
